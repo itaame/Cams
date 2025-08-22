@@ -62,6 +62,9 @@ last_frame_time = time.time()
 
 def callback(xferData):
     global last_frame_time
+    # Refresh timestamp so the watchdog reflects actual frame arrivals,
+    # even when frames are dropped.
+    last_frame_time = time.time()
     with camera_lock:
         # Queue raw data for background processing to avoid heavy work in callback
         if frame_queue.full():
@@ -69,8 +72,6 @@ def callback(xferData):
             print("Frame queue full; dropping frame")
             return
         frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
-        # Update the timestamp here so the watchdog reflects actual frame arrivals
-        last_frame_time = time.time()
 
 
 def process_frames():
