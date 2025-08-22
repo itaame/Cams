@@ -25,12 +25,12 @@ sci_decoder = sci_cam.decoder()
 sci_frame = None
 sci_lock = threading.Lock()
 
-# Callback to get frame from sci cam
+# Callback to receive frames from the scientific camera.
+# Only store the raw frame data here to keep the callback lightweight.
 def sci_cam_callback(data):
     global sci_frame
-    img = sci_decoder.decode(data)
     with sci_lock:
-        sci_frame = img
+        sci_frame = data
 
 def start_scientific_camera():
     sci_cam.beginXfer(sci_cam_callback)
@@ -60,12 +60,14 @@ def generate_stream(idx):
         if idx < 2:
             with locks[idx]:
                 frame = latest_frames[idx]
+            if frame is None:
+                continue
         else:
             with sci_lock:
-                frame = sci_frame
-
-        if frame is None:
-            continue
+                frame_data = sci_frame
+            if frame_data is None:
+                continue
+            frame = sci_decoder.decode(frame_data)
 
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
@@ -83,8 +85,9 @@ recording_threads = []
 video_writers = [None, None, None]
 fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
-# Add dummy properties for scientific camera (manually set size and FPS)
-properties.append((1246, 1024, 30))  # Adjust resolution as needed
+# Properties for the scientific camera (use actual resolution)
+sci_res = sci_cam.resolution()
+properties.append((sci_res.width, sci_res.height, 30))  # Adjust FPS if needed
 
 def get_filename(idx):
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -102,12 +105,14 @@ def record_loop(idx):
         if idx < 2:
             with locks[idx]:
                 frame = latest_frames[idx]
+            if frame is not None:
+                writer.write(frame)
         else:
             with sci_lock:
-                frame = sci_frame
-
-        if frame is not None:
-            writer.write(frame)
+                frame_data = sci_frame
+            if frame_data is not None:
+                frame = sci_decoder.decode(frame_data)
+                writer.write(frame)
         time.sleep(1 / fps)
 
     writer.release()
