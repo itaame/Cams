@@ -1,8 +1,10 @@
 from flask import Flask, Response
 import cv2
 import threading
+import queue
 import numpy as np
 import json
+import time
 from datetime import datetime
 from enum import IntEnum
 from pypuclib import CameraFactory
@@ -19,12 +21,10 @@ class FileCreator:
         self.oldSeq = 0
         self.opened = True
 
-    def write(self, xferData):
-        if self.opened:
-            seq = xferData.sequenceNo()
-            if seq != self.oldSeq:
-                np.save(self.file, xferData.data())
-                self.oldSeq = seq
+    def write(self, seq, data):
+        if self.opened and seq != self.oldSeq:
+            np.save(self.file, data)
+            self.oldSeq = seq
 
     @staticmethod
     def create_json(name, cam):
@@ -52,30 +52,70 @@ res = cam.resolution()
 frame_lock = threading.Lock()
 recording_lock = threading.Lock()
 frame_ready = threading.Event()
+frame_queue = queue.Queue()
 latest_frame = None
 recording = False
 fcreator = None
 current_file = ''
+last_frame_time = time.time()
 
 def callback(xferData):
-    global latest_frame, fcreator, recording
-    with frame_lock:
+    # Queue raw data for background processing to avoid heavy work in callback
+    frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
+
+
+def process_frames():
+    global latest_frame, fcreator, last_frame_time
+    while True:
+        try:
+            seq, data = frame_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            frame = decoder.decode(data, res)
+        except Exception as exc:
+            print(f"Decode error: {exc}")
+            continue
+        with frame_lock:
+            latest_frame = frame
+            frame_ready.set()
         if recording and fcreator is not None:
-            fcreator.write(xferData)
-        latest_frame = decoder.decode(xferData.data(), res)
-        frame_ready.set()
+            fcreator.write(seq, data)
+        last_frame_time = time.time()
+
+
+def watchdog():
+    global last_frame_time
+    while True:
+        time.sleep(5)
+        if time.time() - last_frame_time > 5:
+            print("Watchdog: restarting camera transfer")
+            cam.endXfer()
+            cam.beginXfer(callback)
+            last_frame_time = time.time()
+
+
+processor_thread = threading.Thread(target=process_frames, daemon=True)
+processor_thread.start()
+watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+watchdog_thread.start()
 
 cam.beginXfer(callback)
 
 def generate():
     while True:
-        frame_ready.wait()
+        if not frame_ready.wait(timeout=1):
+            continue
         with frame_lock:
             frame = None if latest_frame is None else latest_frame.copy()
             frame_ready.clear()
         if frame is None:
             continue
-        ret, buffer = cv2.imencode('.jpg', frame)
+        try:
+            ret, buffer = cv2.imencode('.jpg', frame)
+        except Exception as exc:
+            print(f"Encode error: {exc}")
+            continue
         if not ret:
             continue
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
@@ -141,7 +181,7 @@ def index():
 
 if __name__ == '__main__':
     try:
-        app.run(host='0.0.0.0', port=5000)
+        app.run(host='0.0.0.0', port=5000, threaded=True)
     finally:
         cam.endXfer()
         if fcreator is not None:
