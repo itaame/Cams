@@ -1,7 +1,6 @@
 from flask import Flask, Response, render_template_string
 import cv2
 import threading
-import time
 import datetime
 
 app = Flask(__name__)
@@ -14,12 +13,13 @@ cameras = []
 properties = []
 latest_frames = []
 locks = []
+conditions = []
 _initialized = False
 
 
 def init_cameras() -> None:
     """Open camera devices and start capture threads if not already done."""
-    global cameras, properties, latest_frames, locks, _initialized
+    global cameras, properties, latest_frames, locks, conditions, _initialized
     if _initialized:
         return
 
@@ -27,6 +27,7 @@ def init_cameras() -> None:
     properties = []
     latest_frames = [None] * len(cameras)
     locks = [threading.Lock() for _ in cameras]
+    conditions = [threading.Condition(lock) for lock in locks]
 
     for cam in cameras:
         w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -44,11 +45,13 @@ def init_cameras() -> None:
 
 def capture_frames(idx: int) -> None:
     cap = cameras[idx]
+    condition = conditions[idx]
     while True:
         success, frame = cap.read()
         if success:
-            with locks[idx]:
-                latest_frames[idx] = frame.copy()
+            with condition:
+                latest_frames[idx] = frame
+                condition.notify_all()
 
 
 # Flask 3 removed the ``before_first_request`` hook. ``before_request`` runs
@@ -61,11 +64,12 @@ def setup_cameras() -> None:
 
 # ---- MJPEG Streaming ----
 def generate_stream(idx):
+    condition = conditions[idx]
     while True:
-        with locks[idx]:
+        with condition:
+            condition.wait()
             frame = latest_frames[idx]
         if frame is None:
-            time.sleep(0.01)
             continue
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
@@ -100,12 +104,13 @@ def record_loop(idx: int):
     video_writers[idx] = writer
     print(f"[INFO] Started recording: {filename}")
 
+    condition = conditions[idx]
     while not recording_stop_event.is_set():
-        with locks[idx]:
+        with condition:
+            condition.wait()
             frame = latest_frames[idx]
         if frame is not None:
             writer.write(frame)
-        time.sleep(1 / fps)
 
     writer.release()
     video_writers[idx] = None
