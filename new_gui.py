@@ -73,8 +73,17 @@ def callback(xferData):
     # Refresh timestamp so the watchdog reflects actual frame arrivals,
     # even when frames are dropped.
     last_frame_time = time.time()
+    seq = xferData.sequenceNo()
+    data = xferData.data().copy()
+    # Queue frame for recording first so all frames are preserved
+    with recording_lock:
+        if recording:
+            try:
+                record_queue.put_nowait((seq, data))
+            except Exception:
+                pass
+    # Queue frame for display/processing with dropping policy
     with camera_lock:
-        # Queue raw data for background processing to avoid heavy work in callback
         # Discard oldest frames if the queue grows beyond our threshold
         while frame_queue.qsize() >= MAX_QUEUE_SIZE:
             try:
@@ -82,7 +91,7 @@ def callback(xferData):
             except Exception:
                 break
         try:
-            frame_queue.put_nowait((xferData.sequenceNo(), xferData.data().copy()))
+            frame_queue.put_nowait((seq, data))
         except Exception:
             print("Frame queue put failed; dropping frame")
 
@@ -94,13 +103,6 @@ def process_frames():
             seq, data = frame_queue.get(timeout=1)
         except queue.Empty:
             continue
-        # Queue frame data for asynchronous recording to avoid blocking
-        with recording_lock:
-            if recording:
-                try:
-                    record_queue.put_nowait((seq, data))
-                except Exception:
-                    pass
         try:
             frame = decoder.decode(data, res)
         except Exception as exc:
