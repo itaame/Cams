@@ -53,7 +53,8 @@ frame_lock = threading.Lock()
 recording_lock = threading.Lock()
 camera_lock = threading.Lock()
 frame_ready = threading.Event()
-frame_queue = queue.Queue(maxsize=10)
+MAX_QUEUE_SIZE = 30
+frame_queue = queue.SimpleQueue()
 latest_frame = None
 recording = False
 fcreator = None
@@ -67,11 +68,16 @@ def callback(xferData):
     last_frame_time = time.time()
     with camera_lock:
         # Queue raw data for background processing to avoid heavy work in callback
-        if frame_queue.full():
-            # Drop the frame if the queue is full to prevent memory growth
-            print("Frame queue full; dropping frame")
-            return
-        frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
+        # Discard oldest frames if the queue grows beyond our threshold
+        while frame_queue.qsize() >= MAX_QUEUE_SIZE:
+            try:
+                frame_queue.get_nowait()
+            except Exception:
+                break
+        try:
+            frame_queue.put_nowait((xferData.sequenceNo(), xferData.data().copy()))
+        except Exception:
+            print("Frame queue put failed; dropping frame")
 
 
 def process_frames():
@@ -142,7 +148,9 @@ def generate():
         if frame is None:
             continue
         try:
-            ret, buffer = cv2.imencode('.jpg', frame)
+            # Lower JPEG quality to reduce encoding overhead
+            encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+            ret, buffer = cv2.imencode('.jpg', frame, encode_params)
         except Exception as exc:
             print(f"Encode error: {exc}")
             continue
