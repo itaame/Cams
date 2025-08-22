@@ -60,9 +60,14 @@ recording = False
 fcreator = None
 current_file = ''
 last_frame_time = time.time()
+callback_enabled = False
+camera_cmd_queue = queue.Queue()
+restart_scheduled = threading.Event()
 
 def callback(xferData):
     global last_frame_time
+    if not callback_enabled:
+        return
     # Refresh timestamp so the watchdog reflects actual frame arrivals,
     # even when frames are dropped.
     last_frame_time = time.time()
@@ -101,42 +106,69 @@ def process_frames():
                 fcreator.write(seq, data)
 
 
+def camera_manager():
+    global cam, decoder, res, last_frame_time, callback_enabled
+    with camera_lock:
+        cam.beginXfer(callback)
+        callback_enabled = True
+    while True:
+        cmd = camera_cmd_queue.get()
+        if cmd == 'restart':
+            try:
+                with camera_lock:
+                    callback_enabled = False
+                    cam.endXfer()
+                    cam.beginXfer(callback)
+                    callback_enabled = True
+                last_frame_time = time.time()
+            except RuntimeError as exc:
+                print(f"Camera manager: restart failed: {exc}")
+                camera_cmd_queue.put('recreate')
+            finally:
+                restart_scheduled.clear()
+        elif cmd == 'recreate':
+            with camera_lock:
+                callback_enabled = False
+                try:
+                    cam.endXfer()
+                except Exception as exc:
+                    print(f"Camera manager: endXfer failed: {exc}")
+                try:
+                    cam.close()
+                except Exception as close_exc:
+                    print(f"Camera manager: camera close failed: {close_exc}")
+                cam = CameraFactory().create()
+                cam.setFramerateShutter(500, 500)
+                decoder = cam.decoder()
+                res = cam.resolution()
+                cam.beginXfer(callback)
+                callback_enabled = True
+            last_frame_time = time.time()
+            restart_scheduled.clear()
+
 def watchdog():
-    global last_frame_time, cam, decoder, res
+    global last_frame_time
     failure_count = 0
     backoff = 1
     while True:
         time.sleep(5)
         if time.time() - last_frame_time > 5:
             print("Watchdog: restarting camera transfer")
-            try:
-                with camera_lock:
-                    cam.endXfer()
-                    cam.beginXfer(callback)
-            except RuntimeError as exc:
-                failure_count += 1
-                print(f"Watchdog: restart failed ({failure_count}): {exc}")
+            if not restart_scheduled.is_set():
+                restart_scheduled.set()
                 if failure_count >= 3:
                     print("Watchdog: recreating camera after repeated failures")
-                    with camera_lock:
-                        try:
-                            cam.close()
-                        except Exception as close_exc:
-                            print(f"Watchdog: camera close failed: {close_exc}")
-                        cam = CameraFactory().create()
-                        cam.setFramerateShutter(500, 500)
-                        decoder = cam.decoder()
-                        res = cam.resolution()
-                        cam.beginXfer(callback)
-                    last_frame_time = time.time()
+                    camera_cmd_queue.put('recreate')
                     failure_count = 0
-                backoff = min(2 ** failure_count, 60)
-                print(f"Watchdog: backing off for {backoff} seconds")
-                time.sleep(backoff)
-            else:
-                last_frame_time = time.time()
-                failure_count = 0
-                backoff = 1
+                else:
+                    camera_cmd_queue.put('restart')
+            backoff = min(2 ** failure_count, 60)
+            print(f"Watchdog: backing off for {backoff} seconds")
+            time.sleep(backoff)
+            failure_count += 1
+        else:
+            failure_count = 0
+            backoff = 1
 
 def generate():
     while True:
@@ -220,14 +252,17 @@ def index():
 if __name__ == '__main__':
     processor_thread = threading.Thread(target=process_frames, daemon=True)
     processor_thread.start()
+    camera_thread = threading.Thread(target=camera_manager, daemon=True)
+    camera_thread.start()
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
     watchdog_thread.start()
-    cam.beginXfer(callback)
     try:
         app.run(host='0.0.0.0', port=5000, threaded=True)
     finally:
-        cam.endXfer()
-        cam.close()
+        with camera_lock:
+            callback_enabled = False
+            cam.endXfer()
+            cam.close()
         if fcreator is not None:
             fcreator.close()
             FileCreator.create_json(current_file, cam)
