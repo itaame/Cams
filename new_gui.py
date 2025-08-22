@@ -55,6 +55,8 @@ camera_lock = threading.Lock()
 frame_ready = threading.Event()
 MAX_QUEUE_SIZE = 30
 frame_queue = queue.SimpleQueue()
+# Queue dedicated to recording frames to disk without blocking processing
+record_queue = queue.SimpleQueue()
 latest_frame = None
 recording = False
 fcreator = None
@@ -92,6 +94,13 @@ def process_frames():
             seq, data = frame_queue.get(timeout=1)
         except queue.Empty:
             continue
+        # Queue frame data for asynchronous recording to avoid blocking
+        with recording_lock:
+            if recording:
+                try:
+                    record_queue.put_nowait((seq, data))
+                except Exception:
+                    pass
         try:
             frame = decoder.decode(data, res)
         except Exception as exc:
@@ -100,7 +109,13 @@ def process_frames():
         with frame_lock:
             latest_frame = frame
             frame_ready.set()
-        # Ensure exclusive access while writing to avoid races with toggle_recording
+
+
+def write_frames():
+    """Write frames to disk from the recording queue."""
+    global fcreator
+    while True:
+        seq, data = record_queue.get()
         with recording_lock:
             if recording and fcreator is not None:
                 fcreator.write(seq, data)
@@ -252,6 +267,8 @@ def index():
 if __name__ == '__main__':
     processor_thread = threading.Thread(target=process_frames, daemon=True)
     processor_thread.start()
+    writer_thread = threading.Thread(target=write_frames, daemon=True)
+    writer_thread.start()
     camera_thread = threading.Thread(target=camera_manager, daemon=True)
     camera_thread.start()
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
