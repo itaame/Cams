@@ -96,7 +96,9 @@ def process_frames():
 
 
 def watchdog():
-    global last_frame_time
+    global last_frame_time, cam, decoder, res
+    failure_count = 0
+    backoff = 1
     while True:
         time.sleep(5)
         if time.time() - last_frame_time > 5:
@@ -106,11 +108,29 @@ def watchdog():
                     cam.endXfer()
                     cam.beginXfer(callback)
             except RuntimeError as exc:
-                # Log the failure and pause briefly before retrying so the thread survives
-                print(f"Watchdog: restart failed: {exc}")
-                time.sleep(1)
+                failure_count += 1
+                print(f"Watchdog: restart failed ({failure_count}): {exc}")
+                if failure_count >= 3:
+                    print("Watchdog: recreating camera after repeated failures")
+                    with camera_lock:
+                        try:
+                            cam.close()
+                        except Exception as close_exc:
+                            print(f"Watchdog: camera close failed: {close_exc}")
+                        cam = CameraFactory().create()
+                        cam.setFramerateShutter(500, 500)
+                        decoder = cam.decoder()
+                        res = cam.resolution()
+                        cam.beginXfer(callback)
+                    last_frame_time = time.time()
+                    failure_count = 0
+                backoff = min(2 ** failure_count, 60)
+                print(f"Watchdog: backing off for {backoff} seconds")
+                time.sleep(backoff)
             else:
                 last_frame_time = time.time()
+                failure_count = 0
+                backoff = 1
 
 def generate():
     while True:
