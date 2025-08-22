@@ -7,7 +7,14 @@ import json
 import time
 from datetime import datetime
 from enum import IntEnum
-from pypuclib import CameraFactory
+
+# ``pypuclib`` is only available on systems with the specialised camera
+# hardware.  Import it if possible; otherwise fall back to a dummy camera
+# that generates synthetic frames so the web UI can still be started.
+try:  # pragma: no cover - optional dependency
+    from pypuclib import CameraFactory
+except Exception:  # pragma: no cover
+    CameraFactory = None
 
 app = Flask(__name__)
 
@@ -42,6 +49,70 @@ class FileCreator:
         if self.opened:
             self.file.close()
             self.opened = False
+
+if CameraFactory is None:
+    class _DummyDecoder:
+        def quantization(self):
+            return 0
+
+        def decode(self, data, res):
+            return data
+
+    class _DummyResolution:
+        def __init__(self, width=640, height=480):
+            self.width = width
+            self.height = height
+
+    class _DummyXferData:
+        def __init__(self, seq, data):
+            self._seq = seq
+            self._data = data
+
+        def sequenceNo(self):
+            return self._seq
+
+        def data(self):
+            return self._data
+
+    class _DummyCamera:
+        def __init__(self):
+            self._res = _DummyResolution()
+            self._decoder = _DummyDecoder()
+
+        def setFramerateShutter(self, framerate, shutter):
+            pass
+
+        def decoder(self):
+            return self._decoder
+
+        def resolution(self):
+            return self._res
+
+        def framerate(self):
+            return 30
+
+        def shutter(self):
+            return 1 / 30
+
+        def beginXfer(self, callback):
+            def run():
+                seq = 0
+                while True:
+                    frame = np.random.randint(0, 256,
+                                              (self._res.height, self._res.width, 3),
+                                              dtype=np.uint8)
+                    callback(_DummyXferData(seq, frame))
+                    seq += 1
+                    time.sleep(1 / 30)
+
+            threading.Thread(target=run, daemon=True).start()
+
+        def endXfer(self):
+            pass
+
+    class CameraFactory:  # type: ignore
+        def create(self):
+            return _DummyCamera()
 
 cam = CameraFactory().create()
 cam.setFramerateShutter(500, 500)  # 500 fps and 1/500 shutter
