@@ -21,10 +21,12 @@ class FileCreator:
         self.oldSeq = 0
         self.opened = True
 
-    def write(self, seq, data):
-        if self.opened and seq != self.oldSeq:
-            np.save(self.file, data)
-            self.oldSeq = seq
+    def write(self, xferData):
+        if self.opened:
+            seq = xferData.sequenceNo()
+            if self.oldSeq != seq:
+                np.save(self.file, xferData.data())
+                self.oldSeq = seq
 
     @staticmethod
     def create_json(name, cam):
@@ -55,8 +57,6 @@ camera_lock = threading.Lock()
 frame_ready = threading.Event()
 MAX_QUEUE_SIZE = 30
 frame_queue = queue.SimpleQueue()
-# Queue dedicated to recording frames to disk without blocking processing
-record_queue = queue.SimpleQueue()
 latest_frame = None
 recording = False
 fcreator = None
@@ -75,13 +75,10 @@ def callback(xferData):
     last_frame_time = time.time()
     seq = xferData.sequenceNo()
     data = xferData.data().copy()
-    # Queue frame for recording first so all frames are preserved
+    # Directly write frame to disk when recording
     with recording_lock:
-        if recording:
-            try:
-                record_queue.put_nowait((seq, data))
-            except Exception:
-                pass
+        if recording and fcreator is not None:
+            fcreator.write(xferData)
     # Queue frame for display/processing with dropping policy
     with camera_lock:
         # Discard oldest frames if the queue grows beyond our threshold
@@ -111,16 +108,6 @@ def process_frames():
         with frame_lock:
             latest_frame = frame
             frame_ready.set()
-
-
-def write_frames():
-    """Write frames to disk from the recording queue."""
-    global fcreator
-    while True:
-        seq, data = record_queue.get()
-        with recording_lock:
-            if recording and fcreator is not None:
-                fcreator.write(seq, data)
 
 
 def camera_manager():
@@ -269,8 +256,6 @@ def index():
 if __name__ == '__main__':
     processor_thread = threading.Thread(target=process_frames, daemon=True)
     processor_thread.start()
-    writer_thread = threading.Thread(target=write_frames, daemon=True)
-    writer_thread.start()
     camera_thread = threading.Thread(target=camera_manager, daemon=True)
     camera_thread.start()
     watchdog_thread = threading.Thread(target=watchdog, daemon=True)
