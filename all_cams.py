@@ -6,25 +6,43 @@ import datetime
 
 app = Flask(__name__)
 
-# ---- Standard Cameras Setup ----
+# ---- Standard Cameras Setup (lazy) ----
 camera_indices = [1, 2]
-cameras = [cv2.VideoCapture(idx) for idx in camera_indices]
 
-# Ensure decent defaults and store properties for recording
+# Camera resources are initialized on demand to avoid slow startup
+cameras = []
 properties = []
-for cam in cameras:
-    w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = int(cam.get(cv2.CAP_PROP_FPS)) or 30
-    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cam.set(cv2.CAP_PROP_FPS, fps)
-    properties.append((w, h, fps))
+latest_frames = []
+locks = []
+_initialized = False
 
-# ---- Frame Holders ----
-latest_frames = [None, None]
-locks = [threading.Lock(), threading.Lock()]
 
-def capture_frames(idx):
+def init_cameras() -> None:
+    """Open camera devices and start capture threads if not already done."""
+    global cameras, properties, latest_frames, locks, _initialized
+    if _initialized:
+        return
+
+    cameras = [cv2.VideoCapture(idx) for idx in camera_indices]
+    properties = []
+    latest_frames = [None] * len(cameras)
+    locks = [threading.Lock() for _ in cameras]
+
+    for cam in cameras:
+        w = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(cam.get(cv2.CAP_PROP_FPS)) or 30
+        cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cam.set(cv2.CAP_PROP_FPS, fps)
+        properties.append((w, h, fps))
+
+    for i in range(len(cameras)):
+        threading.Thread(target=capture_frames, args=(i,), daemon=True).start()
+
+    _initialized = True
+
+
+def capture_frames(idx: int) -> None:
     cap = cameras[idx]
     while True:
         success, frame = cap.read()
@@ -32,8 +50,10 @@ def capture_frames(idx):
             with locks[idx]:
                 latest_frames[idx] = frame.copy()
 
-for i in range(len(cameras)):
-    threading.Thread(target=capture_frames, args=(i,), daemon=True).start()
+
+@app.before_first_request
+def setup_cameras() -> None:
+    init_cameras()
 
 # ---- MJPEG Streaming ----
 def generate_stream(idx):
