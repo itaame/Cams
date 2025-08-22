@@ -104,14 +104,6 @@ def watchdog():
             else:
                 last_frame_time = time.time()
 
-
-processor_thread = threading.Thread(target=process_frames, daemon=True)
-processor_thread.start()
-watchdog_thread = threading.Thread(target=watchdog, daemon=True)
-watchdog_thread.start()
-
-cam.beginXfer(callback)
-
 def generate():
     while True:
         if not frame_ready.wait(timeout=1):
@@ -190,6 +182,11 @@ def index():
     )
 
 if __name__ == '__main__':
+    processor_thread = threading.Thread(target=process_frames, daemon=True)
+    processor_thread.start()
+    watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    watchdog_thread.start()
+    cam.beginXfer(callback)
     try:
         app.run(host='0.0.0.0', port=5000, threaded=True)
     finally:
