@@ -62,6 +62,9 @@ last_frame_time = time.time()
 def callback(xferData):
     # Queue raw data for background processing to avoid heavy work in callback
     frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
+    # Update the timestamp here so the watchdog reflects actual frame arrivals
+    global last_frame_time
+    last_frame_time = time.time()
 
 
 def process_frames():
@@ -79,9 +82,10 @@ def process_frames():
         with frame_lock:
             latest_frame = frame
             frame_ready.set()
-        if recording and fcreator is not None:
-            fcreator.write(seq, data)
-        last_frame_time = time.time()
+        # Ensure exclusive access while writing to avoid races with toggle_recording
+        with recording_lock:
+            if recording and fcreator is not None:
+                fcreator.write(seq, data)
 
 
 def watchdog():
