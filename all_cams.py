@@ -51,7 +51,11 @@ def capture_frames(idx: int) -> None:
                 latest_frames[idx] = frame.copy()
 
 
-@app.before_first_request
+# Flask 3 removed the ``before_first_request`` hook. ``before_request`` runs
+# before *every* request, so we guard initialization with the ``_initialized``
+# flag already present in ``init_cameras``. This keeps the previous behaviour of
+# setting up the camera resources lazily only once.
+@app.before_request
 def setup_cameras() -> None:
     init_cameras()
 
