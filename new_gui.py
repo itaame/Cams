@@ -3,6 +3,7 @@ import cv2
 import threading
 import numpy as np
 import json
+from datetime import datetime
 from enum import IntEnum
 from pypuclib import CameraFactory
 
@@ -48,15 +49,18 @@ cam.setFramerateShutter(500, 500)  # 500 fps and 1/500 shutter
 decoder = cam.decoder()
 res = cam.resolution()
 
-fcreator = FileCreator('stream')
-
 frame_lock = threading.Lock()
+recording_lock = threading.Lock()
 latest_frame = None
+recording = False
+fcreator = None
+current_file = ''
 
 def callback(xferData):
-    global latest_frame
+    global latest_frame, fcreator, recording
     with frame_lock:
-        fcreator.write(xferData)
+        if recording and fcreator is not None:
+            fcreator.write(xferData)
         latest_frame = decoder.decode(xferData.data(), res)
 
 cam.beginXfer(callback)
@@ -76,14 +80,47 @@ def generate():
 def video_feed():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@app.route('/toggle_recording', methods=['POST'])
+def toggle_recording():
+    global recording, fcreator, current_file
+    with recording_lock:
+        if recording:
+            recording = False
+            if fcreator is not None:
+                fcreator.close()
+                FileCreator.create_json(current_file, cam)
+                fcreator = None
+            return {'status': 'stopped'}
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        current_file = f'sci_cam_{timestamp}'
+        fcreator = FileCreator(current_file)
+        recording = True
+        return {'status': 'recording'}
+
 @app.route('/')
 def index():
-    return '<img src="/video_feed">'
+    return (
+        '<img src="/video_feed">'
+        '<button id="rec" onclick="toggleRecording()">Start Recording</button>'
+        '<script>'
+        'async function toggleRecording() {'
+        '  const res = await fetch("/toggle_recording", {method: "POST"});'
+        '  const data = await res.json();'
+        '  const btn = document.getElementById("rec");'
+        '  if (data.status === "recording") {'
+        '    btn.textContent = "Stop Recording";'
+        '  } else {'
+        '    btn.textContent = "Start Recording";'
+        '  }'
+        '}'
+        '</script>'
+    )
 
 if __name__ == '__main__':
     try:
         app.run(host='0.0.0.0', port=5000)
     finally:
         cam.endXfer()
-        fcreator.close()
-        FileCreator.create_json('stream', cam)
+        if fcreator is not None:
+            fcreator.close()
+            FileCreator.create_json(current_file, cam)
