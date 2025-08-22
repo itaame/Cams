@@ -94,9 +94,15 @@ def watchdog():
         time.sleep(5)
         if time.time() - last_frame_time > 5:
             print("Watchdog: restarting camera transfer")
-            cam.endXfer()
-            cam.beginXfer(callback)
-            last_frame_time = time.time()
+            try:
+                cam.endXfer()
+                cam.beginXfer(callback)
+            except RuntimeError as exc:
+                # Log the failure and pause briefly before retrying so the thread survives
+                print(f"Watchdog: restart failed: {exc}")
+                time.sleep(1)
+            else:
+                last_frame_time = time.time()
 
 
 processor_thread = threading.Thread(target=process_frames, daemon=True)
