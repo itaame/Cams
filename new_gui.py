@@ -194,6 +194,7 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=5000, threaded=True)
     finally:
         cam.endXfer()
+        cam.close()
         if fcreator is not None:
             fcreator.close()
             FileCreator.create_json(current_file, cam)
