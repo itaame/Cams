@@ -51,6 +51,7 @@ res = cam.resolution()
 
 frame_lock = threading.Lock()
 recording_lock = threading.Lock()
+frame_ready = threading.Event()
 latest_frame = None
 recording = False
 fcreator = None
@@ -62,13 +63,16 @@ def callback(xferData):
         if recording and fcreator is not None:
             fcreator.write(xferData)
         latest_frame = decoder.decode(xferData.data(), res)
+        frame_ready.set()
 
 cam.beginXfer(callback)
 
 def generate():
     while True:
+        frame_ready.wait()
         with frame_lock:
-            frame = latest_frame
+            frame = None if latest_frame is None else latest_frame.copy()
+            frame_ready.clear()
         if frame is None:
             continue
         ret, buffer = cv2.imencode('.jpg', frame)
