@@ -51,6 +51,7 @@ res = cam.resolution()
 
 frame_lock = threading.Lock()
 recording_lock = threading.Lock()
+camera_lock = threading.Lock()
 frame_ready = threading.Event()
 frame_queue = queue.Queue(maxsize=10)
 latest_frame = None
@@ -60,15 +61,16 @@ current_file = ''
 last_frame_time = time.time()
 
 def callback(xferData):
-    # Queue raw data for background processing to avoid heavy work in callback
-    if frame_queue.full():
-        # Drop the frame if the queue is full to prevent memory growth
-        print("Frame queue full; dropping frame")
-        return
-    frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
-    # Update the timestamp here so the watchdog reflects actual frame arrivals
     global last_frame_time
-    last_frame_time = time.time()
+    with camera_lock:
+        # Queue raw data for background processing to avoid heavy work in callback
+        if frame_queue.full():
+            # Drop the frame if the queue is full to prevent memory growth
+            print("Frame queue full; dropping frame")
+            return
+        frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
+        # Update the timestamp here so the watchdog reflects actual frame arrivals
+        last_frame_time = time.time()
 
 
 def process_frames():
@@ -99,8 +101,9 @@ def watchdog():
         if time.time() - last_frame_time > 5:
             print("Watchdog: restarting camera transfer")
             try:
-                cam.endXfer()
-                cam.beginXfer(callback)
+                with camera_lock:
+                    cam.endXfer()
+                    cam.beginXfer(callback)
             except RuntimeError as exc:
                 # Log the failure and pause briefly before retrying so the thread survives
                 print(f"Watchdog: restart failed: {exc}")
