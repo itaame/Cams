@@ -52,7 +52,7 @@ res = cam.resolution()
 frame_lock = threading.Lock()
 recording_lock = threading.Lock()
 frame_ready = threading.Event()
-frame_queue = queue.Queue()
+frame_queue = queue.Queue(maxsize=10)
 latest_frame = None
 recording = False
 fcreator = None
@@ -61,6 +61,10 @@ last_frame_time = time.time()
 
 def callback(xferData):
     # Queue raw data for background processing to avoid heavy work in callback
+    if frame_queue.full():
+        # Drop the frame if the queue is full to prevent memory growth
+        print("Frame queue full; dropping frame")
+        return
     frame_queue.put((xferData.sequenceNo(), xferData.data().copy()))
     # Update the timestamp here so the watchdog reflects actual frame arrivals
     global last_frame_time
