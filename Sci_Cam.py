@@ -25,12 +25,10 @@ TARGET_H   = 1080
 # Browser preview fps (acquisition remains 500 fps)
 PREVIEW_FPS = 30
 
-# Save directory
+# Save directory (created at startup)
 SAVE_DIR = os.path.abspath("./captures")
-
-# Binary-only
-FILE_BINARY = 1
-
+os.makedirs(SAVE_DIR, exist_ok=True)
+print("Saving recordings in:", SAVE_DIR)
 
 # =========================
 # Recording writer thread
@@ -59,33 +57,37 @@ class RecordingWriter(threading.Thread):
             "height": self.cam.resolution().height,
             "quantization": self.cam.decoder().quantization()
         }
-        with open(self.basepath + ".json", "w", encoding="utf-8") as f:
+        meta_path = self.basepath + ".json"
+        npy_path  = self.basepath + ".npy"
+        with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        self.bin = open(self.basepath + ".npy", "ab")
+        self.bin = open(npy_path, "ab")
+        print(f"[REC] Writing to:\n  {meta_path}\n  {npy_path}")
 
     def enqueue(self, seq, arr):
         # Prefer newest; if full, drop one
         try:
             self.q.put_nowait((seq, arr))
         except queue.Full:
-            try:
-                _ = self.q.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.q.put_nowait((seq, arr))
-            except queue.Full:
-                pass
+            try: _ = self.q.get_nowait()
+            except queue.Empty: pass
+            try: self.q.put_nowait((seq, arr))
+            except queue.Full: pass
 
     def run(self):
         try:
+            count = 0
             while not self._stop.is_set() or not self.q.empty():
                 try:
                     seq, arr = self.q.get(timeout=0.2)
                 except queue.Empty:
                     self._maybe_flush()
                     continue
+                # Save the owned (copied) numpy array
                 np.save(self.bin, arr, allow_pickle=False)
+                count += 1
+                if count % 500 == 0:
+                    print(f"[REC] Saved {count} frames...")
                 self._maybe_flush()
         finally:
             self._close_files()
@@ -104,12 +106,12 @@ class RecordingWriter(threading.Thread):
         try:
             self.bin.flush()
             self.bin.close()
+            print("[REC] Closed recording files.")
         except Exception:
             pass
 
     def stop(self):
         self._stop.set()
-
 
 # =========================
 # Camera manager
@@ -135,7 +137,6 @@ class CameraManager:
         # Latest xfer for preview
         self._latest_lock = threading.Lock()
         self._latest_xfer = None
-        self._latest_seq = None
 
         # Cached preview JPEG
         self._jpeg_lock = threading.Lock()
@@ -151,18 +152,24 @@ class CameraManager:
 
         # Start DMA + preview thread
         self.cam.beginXfer(self._xfer_callback)
+        print("[CAM] Acquisition started (DMA).")
         self.preview_thread.start()
 
     def _xfer_callback(self, xferData):
         try:
-            seq = xferData.sequenceNo()
+            # Update latest for preview
             with self._latest_lock:
                 self._latest_xfer = xferData
-                self._latest_seq  = seq
+
+            # If recording, COPY the buffer to own it (DMA buffer will be reused!)
             if self.rec_active and self.rec_writer is not None:
-                self.rec_writer.enqueue(seq, xferData.data())
-        except Exception:
-            pass
+                arr_view = xferData.data()
+                if arr_view is not None:
+                    arr_copy = np.ascontiguousarray(arr_view.copy())
+                    self.rec_writer.enqueue(xferData.sequenceNo(), arr_copy)
+        except Exception as e:
+            # Keep acquisition alive
+            print(f"[CB] Error: {e}")
 
     def _preview_worker(self):
         dt = 1.0 / max(1, PREVIEW_FPS)
@@ -181,8 +188,8 @@ class CameraManager:
                     pil.save(buf, format="JPEG", quality=80)
                     with self._jpeg_lock:
                         self._latest_jpeg = buf.getvalue()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[PREVIEW] Error: {e}")
             # throttle
             sleep_t = dt - (time.time() - t0)
             if sleep_t > 0:
@@ -194,6 +201,7 @@ class CameraManager:
             self.rec_writer = RecordingWriter(base, self.cam)
             self.rec_writer.start()
             self.rec_active = True
+            print("[REC] Started.")
             return True, os.path.basename(base)
         else:
             try:
@@ -203,6 +211,7 @@ class CameraManager:
                 pass
             self.rec_writer = None
             self.rec_active = False
+            print("[REC] Stopped.")
             return False, "Stopped"
 
     def get_latest_jpeg(self):
@@ -213,40 +222,34 @@ class CameraManager:
         return {
             "recording": self.rec_active,
             "fps": TARGET_FPS,
-            "resolution": [TARGET_W, TARGET_H]
+            "resolution": [TARGET_W, TARGET_H],
+            "save_dir": SAVE_DIR
         }
 
     def _make_basepath(self):
-        os.makedirs(SAVE_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         name = f"{ts}_{TARGET_FPS}fps_{TARGET_W}x{TARGET_H}_capture"
         return os.path.join(SAVE_DIR, name)
 
     def close(self):
         self._running = False
-        try:
-            self.preview_thread.join(timeout=2.0)
-        except Exception:
-            pass
+        try: self.preview_thread.join(timeout=2.0)
+        except Exception: pass
         try:
             if self.rec_active:
-                self.toggle_recording()  # this will stop it
-        except Exception:
-            pass
+                self.toggle_recording()  # will stop
+        except Exception: pass
         try:
-            if self.cam.isXferring():
-                self.cam.endXfer()
-        except Exception:
-            pass
-        try:
-            self.cam.close()
-        except Exception:
-            pass
-
+            if self.cam.isXferring(): self.cam.endXfer()
+        except Exception: pass
+        try: self.cam.close()
+        except Exception: pass
+        print("[CAM] Closed.")
 
 # =========================
 # Flask app
 # =========================
+from flask import Flask, Response, jsonify, request, render_template_string
 app = Flask(__name__)
 cam_mgr = CameraManager()
 
@@ -259,7 +262,6 @@ INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root{--bg:#0f1115;--panel:#171923;--line:#2d3142;--text:#e7eaf0;--muted:#9aa4b2;--accent:#2b6cb0;--danger:#e53e3e}
-    *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif}
     .wrap{padding:12px}
     .row{display:flex;align-items:center;gap:12px}
@@ -270,20 +272,20 @@ INDEX_HTML = """
     .dot.on{background:var(--danger);box-shadow:0 0 10px rgba(229,62,62,.7)}
     .divider{height:8px}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px;display:inline-block}
-    img{display:block;max-width:100%;height:auto;border-radius:10px}
+    img{display:block;border-radius:10px;width:640px;height:auto} /* shrink live view */
+    .path{color:var(--muted);font-size:12px;margin-top:6px}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <!-- Top-left controls -->
     <div class="row">
       <button id="toggle" class="btn" data-state="off">● Start Recording</button>
       <div class="indicator"><div id="dot" class="dot"></div><span id="stateText">Idle</span></div>
     </div>
     <div class="divider"></div>
-    <!-- Next line: live view, left-aligned -->
     <div class="panel">
       <img id="stream" src="{{ url_for('stream') }}" alt="Live">
+      <div class="path">Saving to: {{ save_dir }}</div>
     </div>
   </div>
 
@@ -307,13 +309,11 @@ async function getStatus(){
     }
   }catch(e){}
 }
-
 document.getElementById('toggle').onclick = async ()=>{
   const r = await fetch('/toggle', {method:'POST'});
   await r.json();
   getStatus();
 };
-
 setInterval(getStatus, 1000);
 getStatus();
 </script>
@@ -323,7 +323,7 @@ getStatus();
 
 @app.route("/")
 def index():
-    return render_template_string(INDEX_HTML)
+    return render_template_string(INDEX_HTML, save_dir=SAVE_DIR)
 
 @app.route("/status")
 def status():
@@ -336,15 +336,12 @@ def toggle_recording():
 
 @app.route("/stream")
 def stream():
-    """
-    MJPEG stream using the latest pre-encoded JPEG produced by preview thread.
-    """
     def gen():
         boundary = b"--frame"
         while True:
             frame = cam_mgr.get_latest_jpeg()
             if frame is None:
-                # send black placeholder to keep connection alive
+                # black placeholder while first frame arrives
                 img = Image.new("L", (TARGET_W, TARGET_H), color=0)
                 buf = io.BytesIO(); img.save(buf, format="JPEG", quality=80)
                 frame = buf.getvalue()
@@ -353,13 +350,9 @@ def stream():
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 def handle_sigterm(signum, frame):
-    try:
-        cam_mgr.close()
-    except Exception:
-        pass
-    os._exit(0)
+    try: cam_mgr.close()
+    finally: os._exit(0)
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, handle_sigterm)
-    os.makedirs(SAVE_DIR, exist_ok=True)
     app.run(host="127.0.0.1", port=5000, threaded=True)
